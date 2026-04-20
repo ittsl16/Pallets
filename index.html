@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#CF002E">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Auditoría de Pallets v27</title>
+<title>Auditoría de Pallets v28</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow:ital,wght@0,300;0,400;0,700;1,300&family=Barlow+Condensed:wght@700;800&display=swap" rel="stylesheet">
 <style>
@@ -166,6 +166,7 @@ main{padding:14px;max-width:640px;margin:0 auto}
 .form-row-2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:13px}
 .form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:13px}
 .form-row-4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:13px}
+.form-row-5{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:8px;margin-bottom:13px}
 label{display:block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--gray);margin-bottom:5px}
 label span.req{color:var(--red)}
 input[type="text"],input[type="number"],input[type="date"],input[type="time"],select,textarea{width:100%;padding:10px 13px;border:1.5px solid var(--border);border-radius:10px;font-family:'Barlow',sans-serif;font-size:14px;color:var(--black);background:#FAFAFA;transition:border-color .2s,box-shadow .2s;appearance:none;-webkit-appearance:none}
@@ -338,7 +339,7 @@ input:disabled,select:disabled{opacity:.5;cursor:not-allowed;background-color:#F
 <div id="splash">
   <div class="splash-logo">AP</div>
   <div class="splash-title">Auditoría<br>de Pallets</div>
-  <div class="splash-sub">v27 · Created by Itzel Perez</div>
+  <div class="splash-sub">v28 · Created by Itzel Perez</div>
 
   <div class="role-selector" id="role-selector">
     <h3>Selecciona tu perfil</h3>
@@ -430,7 +431,7 @@ input:disabled,select:disabled{opacity:.5;cursor:not-allowed;background-color:#F
       <div class="logo-sm">AP</div>
       <div class="header-text">
         <h1>Auditoría de Pallets</h1>
-        <div class="splash-sub">v27 · Created by Itzel Perez</div>
+        <div class="splash-sub">v28 · Created by Itzel Perez</div>
         <span id="hdr-date">—</span>
       </div>
       <div class="header-user">
@@ -645,6 +646,8 @@ function startSession() {
   buildApp();
   showToast(`¡Bienvenido/a ${name}! — ${ROL_CONFIG[currentRole].label} · Turno ${shift}`,'success');
   if (currentRole === 'auditor') setTimeout(() => syncPendientesDesdeNube(), 800);
+  // FIX 2: Mesa también sincroniza al entrar
+  if (currentRole === 'mesa') setTimeout(() => syncPendientesParaMesa(), 1000);
 }
 function hideSplash() {
   document.getElementById('splash').classList.add('hide');
@@ -1129,7 +1132,72 @@ function buildMesaApp(nav, main) {
 }
 
 // ══════════════════════════════════════════════════════
-//  MESA — CARGA DE EMBARQUES (con cancelación integrada)
+//  FIX 2: Sincronización de pendientes para Mesa
+//  Descarga todos los pendientes/asignaciones de la nube
+//  para que cualquier analista vea los embarques del día.
+// ══════════════════════════════════════════════════════
+function syncPendientesParaMesa() {
+  const cbName = '_apMesaSyncCb_' + Date.now();
+  const oldScript = document.getElementById('jsonp-mesa-sync');
+  if (oldScript) oldScript.remove();
+
+  window[cbName] = function(data) {
+    const s = document.getElementById('jsonp-mesa-sync');
+    if (s) s.remove();
+    delete window[cbName];
+    if (data && data.ok && Array.isArray(data.pendientes)) {
+      // Reconstruir mesaDB desde los pendientes de la nube
+      const db = mesaGetEmbarquesDB();
+      data.pendientes.forEach(p => {
+        if (p.tipo_asignacion !== 'embarque_externo') return;
+        const unidad = p.unidad_envio || '';
+        if (!unidad) return;
+        // Solo agregar si no está ya registrada o está pendiente
+        if (!db[unidad] || db[unidad].estado === 'pendiente') {
+          db[unidad] = {
+            tipo:         p.tipo_embarque || '',
+            cliente:      p.cliente || '',
+            destino:      p.destino || p.datos?.destino || '',
+            cortina:      p.cortina || p.datos?.cortina || '',
+            turno:        'Global',
+            cuadrilla:    'Global',
+            estado:       p.cancelado ? 'cancelado' : 'pendiente',
+            pendiente_id: p.id,
+            timestamp:    p.timestamp || new Date().toISOString()
+          };
+        }
+      });
+      mesaSetEmbarquesDB(db);
+
+      // FIX 3: Limpiar de la DB local los que estén cancelados en nube
+      // (los que ya no aparecen en pendientes se consideran completados)
+      const pendienteIds = new Set(data.pendientes.map(p => p.id));
+      Object.entries(db).forEach(([unidad, rec]) => {
+        if (rec.estado === 'pendiente' && rec.pendiente_id && !pendienteIds.has(rec.pendiente_id)) {
+          db[unidad].estado = 'completado';
+        }
+      });
+      mesaSetEmbarquesDB(db);
+
+      mesaRenderEnviados();
+      mesaRenderCancelarLista();
+    }
+  };
+
+  setTimeout(() => {
+    if (window[cbName]) { delete window[cbName]; }
+  }, 8000);
+
+  const script = document.createElement('script');
+  script.id = 'jsonp-mesa-sync';
+  script.src = API_URL + '?action=get_pendientes&callback=' + cbName;
+  script.onerror = () => { if (window[cbName]) { delete window[cbName]; script.remove(); } };
+  document.head.appendChild(script);
+}
+
+// ══════════════════════════════════════════════════════
+//  MESA — CARGA DE EMBARQUES
+//  FIX 1: Ahora soporta 5 columnas (incluye Cortina)
 // ══════════════════════════════════════════════════════
 function fillMesaCargaTab() {
   const tab = document.getElementById('tab-mesa-carga');
@@ -1144,21 +1212,26 @@ function fillMesaCargaTab() {
   </div>
 
   <div class="card">
+    <div class="card-title purple">☁️ Sincronización</div>
+    <div style="font-size:11px;color:var(--gray);margin-bottom:10px">Descarga los embarques cargados por cualquier analista de mesa hoy.</div>
+    <button class="btn btn-purple btn-sm" style="width:auto" onclick="syncPendientesParaMesa()">🔄 Sincronizar embarques del día</button>
+  </div>
+
+  <div class="card">
     <div class="card-title purple">📊 Pegar desde Excel</div>
     <div style="font-size:11px;color:var(--gray);margin-bottom:8px">
-      Copia las columnas <strong>Tipo de Embarque · Unidad de Envío · Cliente · Destino</strong> (Tab entre columnas, Enter entre filas)
+      Copia las columnas <strong>Tipo de Embarque · Unidad de Envío · Cliente · Destino · Cortina</strong> (Tab entre columnas, Enter entre filas)
     </div>
     <textarea id="mesa-paste-area" rows="7"
-      placeholder="Exportación&#9;UE-45821&#9;WALMART&#9;B777&#10;Local&#9;UE-45822&#9;OXXO&#9;C104&#10;Exportación&#9;UE-45823&#9;SAMS&#9;C108"
+      placeholder="Exportación&#9;UE-45821&#9;WALMART&#9;B777&#9;DOOR5&#10;Local&#9;UE-45822&#9;OXXO&#9;C104&#9;DOOR8&#10;Exportación&#9;UE-45823&#9;SAMS&#9;C108&#9;DOOR12"
       style="font-family:monospace;font-size:12px;border:2px solid rgba(108,52,131,0.35);resize:vertical;background:#FAF5FF"
       oninput="mesaParsePaste()"></textarea>
     <div style="height:8px"></div>
-    
   </div>
 
   <div class="card">
     <div class="card-title purple">✏️ Agregar Fila Manual</div>
-    <div class="form-row-4" style="margin-bottom:10px">
+    <div class="form-row-5" style="margin-bottom:10px">
       <div>
         <label>Tipo <span class="req">*</span></label>
         <select id="mesa-manual-tipo">
@@ -1178,6 +1251,10 @@ function fillMesaCargaTab() {
       <div>
         <label>Destino</label>
         <input type="text" id="mesa-manual-destino" placeholder="B777">
+      </div>
+      <div>
+        <label>Cortina</label>
+        <input type="text" id="mesa-manual-cortina" placeholder="DOOR5">
       </div>
     </div>
     <button class="btn btn-purple btn-sm" style="width:auto" onclick="mesaAgregarManual()">+ Agregar Fila</button>
@@ -1206,7 +1283,7 @@ function fillMesaCargaTab() {
     </button>
   </div>
 
-  <!-- CANCELACIÓN DE EMBARQUES — integrada en Carga -->
+  <!-- CANCELACIÓN DE EMBARQUES -->
   <div id="mesa-cancelar-section" class="card" style="border:2px solid rgba(192,57,43,0.3);background:linear-gradient(135deg,#fff,#FFF5F5)">
     <div class="card-title" style="color:#C0392B;border-bottom-color:#C0392B">🚫 Cancelar Embarque</div>
     <div style="font-size:11px;color:var(--gray);margin-bottom:10px">Selecciona un embarque activo para cancelarlo.</div>
@@ -1255,7 +1332,7 @@ function abrirModalCancelar(unidad) {
       <select id="modal-cancel-razon">
         <option value="">— Seleccionar razón —</option>
         <option>Unidad no se presentó</option>
-         <option>Unidad ineficiente</option>
+        <option>Unidad ineficiente</option>
         <option>Cliente canceló</option>
         <option>Problema con la mercancía</option>
         <option>Error de planeación</option>
@@ -1273,51 +1350,81 @@ function abrirModalCancelar(unidad) {
   document.getElementById('cancelar-modal').classList.add('open');
 }
 
+// FIX 3: Cancelación corregida — elimina el pendiente de la nube
+// para que auditores no lo vean al sincronizar
 async function mesaConfirmarCancelacionModal(unidad) {
   const razon = document.getElementById('modal-cancel-razon')?.value || '';
   if (!razon) { showToast('Selecciona una razón de cancelación','error'); return; }
   const obs = (document.getElementById('modal-cancel-obs')?.value || '').trim();
 
-  // Find embarque id from pendientes or db
   const db  = mesaGetEmbarquesDB();
   const rec = db[unidad];
-  const pendiente = pendientes.find(p => {
+
+  // Buscar el pendiente en localStorage global
+  const pendienteLocal = pendientes.find(p => {
     const ue = p.unidad_envio || p.datos?.unidad_envio || '';
     return ue.toUpperCase() === unidad.toUpperCase();
   });
-  const embarqueId = pendiente?.id || rec?.pendiente_id || '';
 
+  // Obtener ID del pendiente desde DB local o desde pendientes array
+  const pendienteId = rec?.pendiente_id || pendienteLocal?.id || '';
+  const embarqueId  = pendienteLocal?.id || rec?.pendiente_id || '';
+
+  const now = new Date().toISOString();
+
+  // 1. Notificar al servidor: cancelar en hoja de embarques
   const cancelBody = JSON.stringify({
     action: 'cancel_embarque',
     embarque_id: embarqueId,
     razon_cancelacion: razon,
     obs_cancelacion: obs,
     analista_mesa: session.name,
-    fecha_cancelacion: new Date().toISOString()
+    fecha_cancelacion: now
+  });
+
+  // 2. FIX 3: TAMBIÉN eliminar de Pendientes_DB en el servidor
+  //    para que auditores al sincronizar no lo vean
+  const deleteBody = JSON.stringify({
+    action: 'delete_pendiente',
+    pendiente_id: pendienteId
   });
 
   showToast('⏳ Registrando cancelación...','');
   try {
     await fetch(API_URL,   { method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain'}, body: cancelBody });
     if (API_URL_2) await fetch(API_URL_2, { method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain'}, body: cancelBody });
+
+    if (pendienteId) {
+      await fetch(API_URL,   { method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain'}, body: deleteBody });
+      if (API_URL_2) await fetch(API_URL_2, { method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain'}, body: deleteBody });
+    }
   } catch(e) { console.warn('Error cancelando embarque:', e); }
 
-  // Remove from pendientes
+  // 3. Limpiar de pendientes locales (todos los dispositivos al sincronizar lo verán limpio)
+  const globalPend = JSON.parse(localStorage.getItem('ap_pendientes_global') || '[]');
+  const filtrado = globalPend.filter(p => {
+    const ue = p.unidad_envio || p.datos?.unidad_envio || '';
+    return ue.toUpperCase() !== unidad.toUpperCase();
+  });
+  localStorage.setItem('ap_pendientes_global', JSON.stringify(filtrado));
+
+  // Actualizar array en memoria también
   const pIdx = pendientes.findIndex(p => {
     const ue = p.unidad_envio || p.datos?.unidad_envio || '';
     return ue.toUpperCase() === unidad.toUpperCase();
   });
   if (pIdx !== -1) {
-    cloudDeletePendiente(pendientes[pIdx].id);
     pendientes.splice(pIdx, 1);
     saveState();
     renderPendientes();
   }
 
-  // Mark as cancelled in mesa DB
+  // 4. Marcar como cancelado en mesa DB local
   if (db[unidad]) {
     db[unidad].estado = 'cancelado';
     db[unidad].razon_cancelacion = razon;
+    db[unidad].cancelado_por = session.name;
+    db[unidad].cancelado_fecha = now;
     mesaSetEmbarquesDB(db);
   }
 
@@ -1339,6 +1446,7 @@ function mesaSetEmbarquesDB(db) {
 
 let mesaCargaFilas = [];
 
+// FIX 1: mesaParsePaste ahora lee 5 columnas (incluye cortina)
 function mesaParsePaste() {
   const raw = (document.getElementById('mesa-paste-area')?.value || '').trim();
   if (!raw) { mesaCargaFilas = []; mesaRenderPreview(); return; }
@@ -1347,39 +1455,44 @@ function mesaParsePaste() {
   raw.split('\n').forEach((line) => {
     const parts = line.split('\t').map(s => s.trim()).filter(Boolean);
     if (!parts.length) return;
-    let tipo = '', unidad = '', cliente = '', destino = '';
-    if (parts.length === 1) { unidad = parts[0]; }
+    let tipo = '', unidad = '', cliente = '', destino = '', cortina = '';
+    if (parts.length === 1)      { unidad = parts[0]; }
     else if (parts.length === 2) { tipo = parts[0]; unidad = parts[1]; }
     else if (parts.length === 3) { tipo = parts[0]; unidad = parts[1]; cliente = parts[2]; }
-    else { tipo = parts[0]; unidad = parts[1]; cliente = parts[2]; destino = parts[3]; }
+    else if (parts.length === 4) { tipo = parts[0]; unidad = parts[1]; cliente = parts[2]; destino = parts[3]; }
+    else                         { tipo = parts[0]; unidad = parts[1]; cliente = parts[2]; destino = parts[3]; cortina = parts[4]; }
     unidad  = unidad.toUpperCase();
     cliente = cliente.toUpperCase();
     destino = destino.toUpperCase();
+    cortina = cortina.toUpperCase();
     if (!unidad) return;
     const rec = db[unidad];
     const estado = rec ? rec.estado : 'nueva';
-    nuevasFilas.push({ tipo, unidad, cliente, destino, estado });
+    nuevasFilas.push({ tipo, unidad, cliente, destino, cortina, estado });
   });
   mesaCargaFilas = nuevasFilas;
   mesaRenderPreview();
 }
 
+// FIX 1: mesaAgregarManual ahora incluye cortina
 function mesaAgregarManual() {
   const tipo    = document.getElementById('mesa-manual-tipo')?.value || '';
   const unidad  = (document.getElementById('mesa-manual-unidad')?.value || '').trim().toUpperCase();
   const cliente = (document.getElementById('mesa-manual-cliente')?.value || '').trim().toUpperCase();
   const destino = (document.getElementById('mesa-manual-destino')?.value || '').trim().toUpperCase();
+  const cortina = (document.getElementById('mesa-manual-cortina')?.value || '').trim().toUpperCase();
   if (!unidad) { showToast('Ingresa la Unidad de Envío', 'error'); return; }
   if (!tipo)   { showToast('Selecciona el Tipo de Embarque', 'error'); return; }
   const db  = mesaGetEmbarquesDB();
   const rec = db[unidad];
   const estado = rec ? rec.estado : 'nueva';
-  mesaCargaFilas.push({ tipo, unidad, cliente, destino, estado });
+  mesaCargaFilas.push({ tipo, unidad, cliente, destino, cortina, estado });
   mesaRenderPreview();
   if (document.getElementById('mesa-manual-tipo'))    document.getElementById('mesa-manual-tipo').value   = '';
   if (document.getElementById('mesa-manual-unidad'))  document.getElementById('mesa-manual-unidad').value = '';
   if (document.getElementById('mesa-manual-cliente')) document.getElementById('mesa-manual-cliente').value= '';
   if (document.getElementById('mesa-manual-destino')) document.getElementById('mesa-manual-destino').value= '';
+  if (document.getElementById('mesa-manual-cortina')) document.getElementById('mesa-manual-cortina').value= '';
   showToast('✓ Fila agregada', 'success');
 }
 
@@ -1388,6 +1501,7 @@ function mesaEliminarFila(idx) {
   mesaRenderPreview();
 }
 
+// FIX 1: mesaRenderPreview muestra columna Cortina
 function mesaRenderPreview() {
   const card  = document.getElementById('mesa-preview-card');
   const wrap  = document.getElementById('mesa-preview-table-wrap');
@@ -1413,7 +1527,7 @@ function mesaRenderPreview() {
   const seenRender = new Set();
   let html = `<table class="preview-table">
     <thead><tr>
-      <th>#</th><th>Tipo</th><th>Unidad de Envío</th><th>Cliente</th><th>Destino</th><th>Estado</th><th></th>
+      <th>#</th><th>Tipo</th><th>Unidad de Envío</th><th>Cliente</th><th>Destino</th><th>Cortina</th><th>Estado</th><th></th>
     </tr></thead><tbody>`;
 
   mesaCargaFilas.forEach((f, i) => {
@@ -1444,6 +1558,7 @@ function mesaRenderPreview() {
       <td><strong>${f.unidad}</strong></td>
       <td>${f.cliente || '—'}</td>
       <td>${f.destino || '—'}</td>
+      <td>${f.cortina || '—'}</td>
       <td>${statusHtml}</td>
       <td>${delBtn}</td>
     </tr>`;
@@ -1452,6 +1567,7 @@ function mesaRenderPreview() {
   wrap.innerHTML = html;
 }
 
+// FIX 1: mesaEnviarAsignaciones incluye cortina en el pendiente
 async function mesaEnviarAsignaciones() {
   const nota = document.getElementById('mesa-carga-nota')?.value.trim() || '';
 
@@ -1483,7 +1599,8 @@ async function mesaEnviarAsignaciones() {
       tipo_embarque:     f.tipo,
       unidad_envio:      f.unidad,
       cliente:           f.cliente,
-      destino:           f.destino || '',   // ← nuevo campo destino
+      destino:           f.destino || '',
+      cortina:           f.cortina || '',   // FIX 1: incluir cortina
       turno_destino:     '',
       cuadrilla_destino: '',
       nota_supervisor:   nota,
@@ -1494,7 +1611,14 @@ async function mesaEnviarAsignaciones() {
       ultimo_turno:      'Global',
       ultimo_auditor:    'Mesa: ' + session.name,
       avance:            'Sin iniciar',
-      datos: { unidad_envio: f.unidad, cliente: f.cliente, tipo_carga: f.tipo, destino: f.destino||'', cortina: '', avance: 'Sin iniciar' }
+      datos: {
+        unidad_envio: f.unidad,
+        cliente:      f.cliente,
+        tipo_carga:   f.tipo,
+        destino:      f.destino || '',
+        cortina:      f.cortina || '',   // FIX 1: incluir cortina en datos
+        avance:       'Sin iniciar'
+      }
     };
   });
 
@@ -1503,6 +1627,7 @@ async function mesaEnviarAsignaciones() {
       tipo:         f.tipo,
       cliente:      f.cliente,
       destino:      f.destino || '',
+      cortina:      f.cortina || '',   // FIX 1
       turno:        'Global',
       cuadrilla:    'Global',
       estado:       'pendiente',
@@ -1541,6 +1666,7 @@ function mesaLimpiarCarga() {
   const nt = document.getElementById('mesa-carga-nota');     if (nt) nt.value = '';
 }
 
+// FIX 2: mesaRenderEnviados muestra también la cortina
 function mesaRenderEnviados() {
   const sec = document.getElementById('mesa-enviados-section');
   if (!sec) return;
@@ -1566,7 +1692,7 @@ function mesaRenderEnviados() {
     <div style="overflow-x:auto">
       <table class="preview-table" style="margin-top:0">
         <thead><tr>
-          <th>Unidad</th><th>Cliente</th><th>Tipo</th><th>Destino</th><th>Estado</th>
+          <th>Unidad</th><th>Cliente</th><th>Tipo</th><th>Destino</th><th>Cortina</th><th>Estado</th>
         </tr></thead><tbody>`;
 
   const sorted = entries.sort((a, b) => a[1].estado === b[1].estado ? 0 : a[1].estado === 'completado' ? 1 : -1);
@@ -1584,6 +1710,7 @@ function mesaRenderEnviados() {
       <td>${rec.cliente || '—'}</td>
       <td>${rec.tipo || '—'}</td>
       <td>${rec.destino || '—'}</td>
+      <td>${rec.cortina || '—'}</td>
       <td>${statusHtml}</td>
     </tr>`;
   });
@@ -1604,7 +1731,7 @@ function mesaLimpiarHistorial() {
 }
 
 // ══════════════════════════════════════════════════════
-//  MESA — TAB MC (sin campos de tipo/unidad/cliente/destino)
+//  MESA — TAB MC
 // ══════════════════════════════════════════════════════
 function fillMesaTab() {
   const tab = document.getElementById('tab-mesa');
@@ -2552,7 +2679,6 @@ function resolveHerencia(herenciaId, record) {
         db[unidad].completado_turno = session.shift;
         db[unidad].completado_fecha = new Date().toISOString();
         mesaSetEmbarquesDB(db);
-        // Refresh cancel list
         mesaRenderCancelarLista();
       }
     }
@@ -2744,6 +2870,7 @@ function showHerenciaBanner(panelId, pend) {
 
 // ══════════════════════════════════════════════════════
 //  RENDER PENDIENTES
+//  FIX 3: Filtrar cancelados al renderizar
 // ══════════════════════════════════════════════════════
 function esAsignacionExterna(p) {
   return p.tipo_asignacion === 'embarque_externo';
@@ -2754,10 +2881,14 @@ function renderPendientes() {
   if (!container) return;
 
   const mesaDB = mesaGetEmbarquesDB();
+
+  // FIX 3: Filtrar cancelados Y completados
   pendientes = pendientes.filter(p => {
     if (!esAsignacionExterna(p)) return true;
     const unidad = p.unidad_envio || p.datos?.unidad_envio || '';
-    return mesaDB[unidad]?.estado !== 'completado';
+    const estadoMesa = mesaDB[unidad]?.estado;
+    // Excluir si está completado o cancelado
+    return estadoMesa !== 'completado' && estadoMesa !== 'cancelado';
   });
 
   updateNavBadge();
@@ -2794,6 +2925,8 @@ function renderPendientes() {
       const cliente = p.cliente      || p.datos?.cliente      || '—';
       const tipo    = p.tipo_embarque|| p.datos?.tipo_carga   || '—';
       const destino = p.destino      || p.datos?.destino      || '—';
+      // FIX 1: Mostrar cortina si está disponible
+      const cortina = p.cortina      || p.datos?.cortina      || '';
       const sup     = p.supervisor   || '—';
       const nota    = p.nota_supervisor ? `<br>📝 <em>${p.nota_supervisor}</em>` : '';
       html += `
@@ -2803,7 +2936,7 @@ function renderPendientes() {
         <div class="pi-body">
           <div style="margin-bottom:4px"><span class="pa-badge"> Asignación </span></div>
           <div class="pi-title">${unidad} · ${cliente}</div>
-          <div class="pi-meta">Tipo: <strong>${tipo}</strong> · Destino: <strong>${destino}</strong> · Por: ${sup}${nota}</div>
+          <div class="pi-meta">Tipo: <strong>${tipo}</strong> · Destino: <strong>${destino}</strong>${cortina?' · Cortina: <strong>'+cortina+'</strong>':''} · Por: ${sup}${nota}</div>
           <div class="pi-actions">
             <button class="pi-btn" style="background:#E07000;color:white" onclick="iniciarDesdeAsignacion('${p.id}')">▶ Iniciar</button>
             <button class="pi-btn pi-btn-ver" onclick="verDetallePendiente('${p.id}')">👁 Ver</button>
@@ -2872,6 +3005,7 @@ function updateNavBadge() {
   badge.classList.toggle('hidden', pendientes.length === 0);
 }
 
+// FIX 1: iniciarDesdeAsignacion prefilla la cortina si está disponible
 function iniciarDesdeAsignacion(pendienteId) {
   const pend = pendientes.find(p => p.id === pendienteId);
   if (!pend) return;
@@ -2885,11 +3019,19 @@ function iniciarDesdeAsignacion(pendienteId) {
     const cliente = pend.cliente || pend.datos?.cliente || '';
     const tipo    = pend.tipo_embarque || pend.datos?.tipo_carga || '';
     const destino = pend.destino || pend.datos?.destino || '';
+    const cortina = pend.cortina || pend.datos?.cortina || '';  // FIX 1
 
     if (document.getElementById('e-unidad'))  document.getElementById('e-unidad').value  = unidad;
     if (document.getElementById('e-cliente')) document.getElementById('e-cliente').value = cliente;
     if (document.getElementById('e-tipo-carga-val'))   document.getElementById('e-tipo-carga-val').value   = tipo;
     if (document.getElementById('e-tipo-destino-val')) document.getElementById('e-tipo-destino-val').value = destino;
+
+    // FIX 1: Prellenar la cortina en el formulario de embarque
+    if (cortina) {
+      const cortinaNum = cortina.replace(/^DOOR/i, '');
+      const cortinaEl = document.getElementById('e-cortina');
+      if (cortinaEl) cortinaEl.value = cortinaNum;
+    }
 
     const infoPanel = document.getElementById('embarque-asignacion-info');
     const infoDetalle = document.getElementById('embarque-asig-detalle');
@@ -2900,6 +3042,7 @@ function iniciarDesdeAsignacion(pendienteId) {
         ['Cliente',         cliente || '—'],
         ['Tipo Embarque',   tipo || '—'],
         ['Destino',         destino || '—'],
+        ['Cortina',         cortina || '—'],   // FIX 1
         ['Cargado por',     pend.supervisor || '—'],
         ['Nota',            pend.nota_supervisor || '—'],
       ].map(c =>
@@ -2922,7 +3065,7 @@ function iniciarDesdeAsignacion(pendienteId) {
           <strong>Por:</strong> ${pend.supervisor||'—'} &nbsp;|&nbsp;
           <strong>Unidad:</strong> ${unidad||'—'} &nbsp;|&nbsp;
           <strong>Tipo:</strong> ${tipo||'—'} &nbsp;|&nbsp;
-          <strong>Destino:</strong> ${destino||'—'}
+          <strong>Destino:</strong> ${destino||'—'}${cortina?' &nbsp;|&nbsp; <strong>Cortina:</strong> '+cortina:''}
           ${pend.nota_supervisor ? `<br>📝 <em>${pend.nota_supervisor}</em>` : ''}
         </div>
         <div style="font-size:11px;color:#E07000;font-weight:700">✓ Completa la información faltante y guarda el registro.</div>
@@ -2946,6 +3089,7 @@ function verDetallePendiente(id) {
 
   if (esAsig) {
     const destino = pend.destino || d.destino || '—';
+    const cortina = pend.cortina || d.cortina || '—'; // FIX 1
     html += `
     <div style="background:linear-gradient(135deg,#FFF8F0,#FFF3E0);border:2px solid #E07000;border-radius:12px;padding:14px;margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
@@ -2957,6 +3101,7 @@ function verDetallePendiente(id) {
       ['Cliente',         pend.cliente||'—'],
       ['Tipo Embarque',   pend.tipo_embarque||'—'],
       ['Destino',         destino],
+      ['Cortina',         cortina],   // FIX 1
       ['Cargado por',     pend.supervisor||'—'],
     ];
     html += campos.map(c=>`
