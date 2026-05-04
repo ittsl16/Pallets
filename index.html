@@ -586,13 +586,13 @@ const PERSONAS = {
     'Daniela Ortega Osorio','Cristopher Jonathan Paz Ledezma','Ana Karen Eluvia Gallardo Colin',
     'Delfino Martinez Martinez','Carlos Axel Gonzalez Beltran','Miriam Gutierrez Santiago',
     'Griselda Nolasco Campos','Angelica Lopez Guadalupe','Belén Sarahi Gomez Parra',
-    'Brenda Rosalino Polenciano','Paulina Stephanie Cruz Navarro',
+    'Brenda Rosalino Polenciano','Paulina Stephanie Cruz Navarro','David Alejandro Torres Tableros',
   ],
   analista: [
     'Ana Lilia Avalos Vazquez','Jose Salvador Segura Cruz','Luis Miguel Morales Alvarado','Aleyda Hernandez Bastida',
   ],
   mesa: [
-    'Pedro Luis Solis Mendoza','Juan Carlos Lopez Flores','José Roberto Garcia Acosta','Paulina Stephanie Cruz Navarro','Angel Rafael Viveros Rodriguez'
+    'Pedro Luis Solis Mendoza','Juan Carlos Lopez Flores','José Roberto Garcia Acosta','Paulina Stephanie Cruz Navarro','Angel Rafael Viveros Rodriguez','Aleyda Hernandez Bastida'
   ],
   inventario: [
     'Aldo Felipe Hernandez Velazquez','Javier Arteaga Trejo','Israel Sanchez Lopez','Fidel Rojas Oliva'
@@ -736,10 +736,32 @@ function startSession() {
   hideSplash();
   updateHeader();
   buildApp();
+   if (currentRole === 'auditor' || currentRole === 'mesa') {
+    limpiarDuplicadosLocales();
+  }
   showToast(`¡Bienvenido/a ${name}! — ${ROL_CONFIG[currentRole].label} · Turno ${shift}`,'success');
   if (currentRole === 'auditor') setTimeout(() => syncPendientesDesdeNube(), 800);
   // FIX 2: Mesa también sincroniza al entrar
   if (currentRole === 'mesa') setTimeout(() => syncPendientesParaMesa(), 1000);
+}
+function limpiarDuplicadosLocales() {
+  const seen = new Map();
+  const unicos = [];
+  
+  pendientes.forEach(p => {
+    if (!p || !p.id) return;
+    if (!seen.has(p.id)) {
+      seen.set(p.id, true);
+      unicos.push(p);
+    }
+  });
+  
+  if (unicos.length !== pendientes.length) {
+    Logger.log(`Limpiados ${pendientes.length - unicos.length} duplicados`);
+    pendientes = unicos;
+    localStorage.setItem('ap_pendientes_global', JSON.stringify(pendientes));
+    saveState();
+  }
 }
 function hideSplash() {
   document.getElementById('splash').classList.add('hide');
@@ -1238,14 +1260,26 @@ function syncPendientesParaMesa() {
     const s = document.getElementById('jsonp-mesa-sync');
     if (s) s.remove();
     delete window[cbName];
+    
     if (data && data.ok && Array.isArray(data.pendientes)) {
-      // Reconstruir mesaDB desde los pendientes de la nube
       const db = mesaGetEmbarquesDB();
-      data.pendientes.forEach(p => {
-        if (p.tipo_asignacion !== 'embarque_externo') return;
+      
+      // CORRECCIÓN: Procesar solo asignaciones válidas
+      const asignacionesValidas = data.pendientes.filter(p => {
+        if(p.tipo_asignacion !== 'embarque_externo') return false;
         const unidad = p.unidad_envio || '';
-        if (!unidad) return;
-        // Solo agregar si no está ya registrada o está pendiente
+        if(!unidad) return false;
+        
+        // No procesar si ya está completado o cancelado en DB
+        const estadoActual = db[unidad]?.estado;
+        return estadoActual !== 'completado' && estadoActual !== 'cancelado';
+      });
+      
+      // CORRECCIÓN: Actualizar DB sin crear duplicados
+      asignacionesValidas.forEach(p => {
+        const unidad = p.unidad_envio || '';
+        
+        // Solo actualizar si no existe O si está pendiente
         if (!db[unidad] || db[unidad].estado === 'pendiente') {
           db[unidad] = {
             tipo:         p.tipo_embarque || '',
@@ -1254,24 +1288,22 @@ function syncPendientesParaMesa() {
             cortina:      p.cortina || p.datos?.cortina || '',
             turno:        'Global',
             cuadrilla:    'Global',
-            estado:       p.cancelado ? 'cancelado' : 'pendiente',
+            estado:       'pendiente',
             pendiente_id: p.id,
             timestamp:    p.timestamp || new Date().toISOString()
           };
         }
       });
-      mesaSetEmbarquesDB(db);
-
-      // FIX 3: Limpiar de la DB local los que estén cancelados en nube
-      // (los que ya no aparecen en pendientes se consideran completados)
+      
+      // CORRECCIÓN: Limpiar completados que ya no están en pendientes
       const pendienteIds = new Set(data.pendientes.map(p => p.id));
       Object.entries(db).forEach(([unidad, rec]) => {
         if (rec.estado === 'pendiente' && rec.pendiente_id && !pendienteIds.has(rec.pendiente_id)) {
           db[unidad].estado = 'completado';
         }
       });
+      
       mesaSetEmbarquesDB(db);
-
       mesaRenderEnviados();
       mesaRenderCancelarLista();
     }
@@ -1284,7 +1316,12 @@ function syncPendientesParaMesa() {
   const script = document.createElement('script');
   script.id = 'jsonp-mesa-sync';
   script.src = API_URL + '?action=get_pendientes&callback=' + cbName;
-  script.onerror = () => { if (window[cbName]) { delete window[cbName]; script.remove(); } };
+  script.onerror = () => { 
+    if (window[cbName]) { 
+      delete window[cbName]; 
+      script.remove(); 
+    } 
+  };
   document.head.appendChild(script);
 }
 
@@ -2787,15 +2824,55 @@ function esPendiente(estado) {
 }
 function gestionarPendiente(record, herenciaIdPadre) {
   const estadoActual = record.estado || '';
+  
+  // CORRECCIÓN: Si es resolución de asignación externa, no crear nuevo pendiente
   if (herenciaIdPadre) {
     const padrePend = pendientes.find(p => p.id === herenciaIdPadre);
-    if (padrePend && esAsignacionExterna(padrePend) && !esPendiente(estadoActual)) return;
+    if (padrePend && esAsignacionExterna(padrePend) && !esPendiente(estadoActual)) {
+      return; // No crear pendiente si se finalizó una asignación
+    }
   }
+  
+  // Si se resolvió una herencia normal, no crear nuevo pendiente
   if (herenciaIdPadre && !esPendiente(estadoActual)) return;
+  
+  // Solo crear pendiente si el estado actual es pendiente/herencia
   if (esPendiente(estadoActual)) {
-    const pendiente = { id:'P'+Date.now(), herencia_padre:herenciaIdPadre||null, modulo:record.tipo, subtipo:record.subtipo||'', sto:record.sto||'', unidad_envio:record.unidad_envio||'', cortina:record.cortina||'', cliente:record.cliente||'', ultimo_registro_id:record.id, ultimo_auditor:record.auditor, ultimo_turno:record.turno, fecha_creacion:record.fecha, turnos:buildTurnosAcum(herenciaIdPadre, record), avance:record.avance||'', datos:record };
+    // CORRECCIÓN: Verificar que no exista ya un pendiente con esta unidad
+    const unidadExistente = record.unidad_envio || record.sto || '';
+    const yaExiste = pendientes.some(p => {
+      const u = p.unidad_envio || p.datos?.unidad_envio || p.datos?.sto || '';
+      return u && unidadExistente && u.toUpperCase() === unidadExistente.toUpperCase() && p.id !== herenciaIdPadre;
+    });
+    
+    if(yaExiste) {
+      showToast('⚠️ Ya existe un pendiente para esta unidad','warning');
+      return;
+    }
+    
+    const pendiente = { 
+      id: 'P' + Date.now(), 
+      herencia_padre: herenciaIdPadre || null, 
+      modulo: record.tipo, 
+      subtipo: record.subtipo || '', 
+      sto: record.sto || '', 
+      unidad_envio: record.unidad_envio || '', 
+      cortina: record.cortina || '', 
+      cliente: record.cliente || '', 
+      ultimo_registro_id: record.id, 
+      ultimo_auditor: record.auditor, 
+      ultimo_turno: record.turno, 
+      fecha_creacion: record.fecha, 
+      turnos: buildTurnosAcum(herenciaIdPadre, record), 
+      avance: record.avance || '', 
+      datos: record 
+    };
+    
     pendientes.push(pendiente);
     cloudSavePendiente(pendiente);
+    saveState();
+    renderPendientes();
+    updateNavBadge();
     showToast('⏳ Herencia creada — aparece en pestaña Pendientes','warning');
     setTimeout(() => flashPendienteItems(), 600);
   }
@@ -2808,9 +2885,18 @@ function buildTurnosAcum(herenciaIdPadre, record) {
 function resolveHerencia(herenciaId, record) {
   const idx = pendientes.findIndex(p => p.id === herenciaId);
   if (idx === -1) return;
+  
   const padre = pendientes[idx];
-  herenciasResueltas.push({ ...padre, estado_final: record.estado, fecha_resolucion: session.date, registro_final_id: record.id });
+  
+  // Guardar en resueltas
+  herenciasResueltas.push({ 
+    ...padre, 
+    estado_final: record.estado, 
+    fecha_resolucion: session.date, 
+    registro_final_id: record.id 
+  });
 
+  // CORRECCIÓN: Limpiar asignaciones de mesa DB
   if (esAsignacionExterna(padre)) {
     const unidad = padre.unidad_envio || padre.datos?.unidad_envio || '';
     if (unidad) {
@@ -2825,16 +2911,30 @@ function resolveHerencia(herenciaId, record) {
       }
     }
   } else if (padre.ultimo_registro_id) {
+    // Limpiar registro padre de herencias normales
     const listaKey = padre.modulo === 'recibo' ? 'recibo' : padre.modulo === 'armado' ? 'armado' : 'embarque';
     const rIdx = records[listaKey].findIndex(r => r.id === padre.ultimo_registro_id);
     if (rIdx !== -1) records[listaKey].splice(rIdx, 1);
   }
 
   record._herencia_padre_id = padre.ultimo_registro_id || null;
+  
+  // CORRECCIÓN: Eliminar de pendientes locales
   pendientes.splice(idx, 1);
+  
+  // CORRECCIÓN: Sincronizar con localStorage
+  const globalPend = JSON.parse(localStorage.getItem('ap_pendientes_global') || '[]');
+  const filtrado = globalPend.filter(p => p.id !== herenciaId);
+  localStorage.setItem('ap_pendientes_global', JSON.stringify(filtrado));
+  
+  saveState();
   cloudDeletePendiente(padre.id);
+  
   const esAsig = esAsignacionExterna(padre);
   showToast(esAsig ? '✅ Embarque asignado completado' : '✅ Herencia resuelta y cerrada', 'success');
+  
+  renderPendientes();
+  updateNavBadge();
 }
 
 function continuarHerencia(pendienteId) {
@@ -3395,54 +3495,107 @@ async function uploadPhotos(photoList,identificador,cortina,fecha,cuadrilla,proc
     }catch(e){}
   }
 }
-
 async function syncPendientesDesdeNube(){
   showToast('🔄 Sincronizando pendientes...','');
   const cbName='_apCb_'+Date.now();
-  const oldScript=document.getElementById('jsonp-pendientes'); if(oldScript) oldScript.remove();
+  const oldScript=document.getElementById('jsonp-pendientes'); 
+  if(oldScript) oldScript.remove();
+  
   let timeoutId;
+  
   window[cbName]=function(data){
     clearTimeout(timeoutId);
-    const s=document.getElementById('jsonp-pendientes'); if(s) s.remove();
+    const s=document.getElementById('jsonp-pendientes'); 
+    if(s) s.remove();
     delete window[cbName];
-    if(data&&data.ok&&Array.isArray(data.pendientes)){
+    
+    if(data && data.ok && Array.isArray(data.pendientes)){
+      // CORRECCIÓN: Deduplicar por ID antes de procesar
+      const cloudMap = new Map();
+      data.pendientes.forEach(p => {
+        if(p && p.id) cloudMap.set(p.id, p);
+      });
+      
+      // CORRECCIÓN: Filtrar cancelados/completados desde la nube
       const mesaDB = mesaGetEmbarquesDB();
-      const cloudAsig = data.pendientes.filter(p =>
-        esAsignacionExterna(p) &&
-        mesaDB[p.unidad_envio]?.estado !== 'completado'
-      );
-      const cloudNorm = data.pendientes.filter(p => !esAsignacionExterna(p));
-      const localNorm = pendientes.filter(p => !esAsignacionExterna(p));
-      const seen = new Set();
-      const merged = [];
-      [...cloudNorm, ...cloudAsig, ...localNorm].forEach(p => {
-        if (!seen.has(p.id) && mesaDB[p.unidad_envio]?.estado !== 'completado') {
-          seen.add(p.id);
-          merged.push(p);
+      const validCloud = Array.from(cloudMap.values()).filter(p => {
+        // Si es asignación externa, verificar estado en mesaDB
+        if(esAsignacionExterna(p)) {
+          const unidad = p.unidad_envio || p.datos?.unidad_envio || '';
+          if(!unidad) return false;
+          const estadoMesa = mesaDB[unidad]?.estado;
+          return estadoMesa !== 'completado' && estadoMesa !== 'cancelado';
+        }
+        // Herencias normales: mantener todas (el backend las limpia)
+        return true;
+      });
+      
+      // CORRECCIÓN: Fusionar con locales sin duplicar
+      const localPend = JSON.parse(localStorage.getItem('ap_pendientes_global') || '[]');
+      const merged = new Map();
+      
+      // Primero agregar de la nube (tienen prioridad)
+      validCloud.forEach(p => merged.set(p.id, p));
+      
+      // Luego agregar locales que NO estén en nube
+      localPend.forEach(p => {
+        if(p && p.id && !merged.has(p.id)) {
+          // Solo agregar locales que no sean asignaciones completadas
+          if(esAsignacionExterna(p)) {
+            const unidad = p.unidad_envio || p.datos?.unidad_envio || '';
+            const estadoMesa = mesaDB[unidad]?.estado;
+            if(estadoMesa !== 'completado' && estadoMesa !== 'cancelado') {
+              merged.set(p.id, p);
+            }
+          } else {
+            merged.set(p.id, p);
+          }
         }
       });
-      pendientes = merged;
-      saveState(); renderPendientes(); updateNavBadge();
-      const asigCount = merged.filter(p=>esAsignacionExterna(p)).length;
-      const herCount  = merged.filter(p=>!esAsignacionExterna(p)).length;
+      
+      // Convertir a array y guardar
+      pendientes = Array.from(merged.values());
+      localStorage.setItem('ap_pendientes_global', JSON.stringify(pendientes));
+      saveState(); 
+      renderPendientes(); 
+      updateNavBadge();
+      
+      const asigCount = pendientes.filter(p=>esAsignacionExterna(p)).length;
+      const herCount  = pendientes.filter(p=>!esAsignacionExterna(p)).length;
+      
       let msg = '';
-      if (!merged.length) msg = '✅ Sin pendientes activos';
-      else {
+      if (!pendientes.length) {
+        msg = '✅ Sin pendientes activos';
+      } else {
         const parts = [];
         if (asigCount) parts.push(`${asigCount} asignación(es)`);
         if (herCount)  parts.push(`${herCount} herencia(s)`);
         msg = `⚠️ ${parts.join(' · ')}`;
       }
-      showToast(msg, merged.length>0?'warning':'success');
-    }else{showToast('⚠️ Respuesta inesperada del servidor','warning');}
+      showToast(msg, pendientes.length>0?'warning':'success');
+    } else {
+      showToast('⚠️ Respuesta inesperada del servidor','warning');
+    }
   };
-  timeoutId=setTimeout(()=>{const s=document.getElementById('jsonp-pendientes');if(s)s.remove();delete window[cbName];showToast(pendientes.length>0?`⚠️ ${pendientes.length} pendiente(s) en caché local`:'Sin conexión','');},10000);
+  
+  timeoutId=setTimeout(()=>{
+    const s=document.getElementById('jsonp-pendientes');
+    if(s) s.remove();
+    delete window[cbName];
+    showToast(pendientes.length>0 ? `⚠️ ${pendientes.length} pendiente(s) en caché local` : 'Sin conexión','');
+  }, 10000);
+  
   const script=document.createElement('script');
   script.id='jsonp-pendientes';
   script.src=API_URL+'?action=get_pendientes&callback='+cbName;
-  script.onerror=()=>{clearTimeout(timeoutId);script.remove();delete window[cbName];};
+  script.onerror=()=>{
+    clearTimeout(timeoutId);
+    script.remove();
+    delete window[cbName];
+  };
   document.head.appendChild(script);
 }
+
 async function cloudSavePendiente(pendiente){
   try{const body=JSON.stringify({action:'save_pendiente',pendiente});await fetch(API_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body});if(API_URL_2)await fetch(API_URL_2,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body});}catch(e){}
 }
@@ -3836,7 +3989,7 @@ function renderResumenPreview(d) {
   <div class="pdf-header-bar">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
       <div>
-        <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:2px;opacity:.7;margin-bottom:4px">SISTEMA DE AUDITORÍA DE PALLETS · IPX</div>
+        <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:2px;opacity:.7;margin-bottom:4px">SISTEMA DE AUDITORÍA DE PALLETS</div>
         <h2 style="font-size:20px;font-weight:800;letter-spacing:-.2px;margin:0">Reporte Histórico de Auditoría</h2>
       </div>
       <div style="text-align:right;font-size:10px;opacity:.75;line-height:1.7">
@@ -3932,7 +4085,7 @@ function renderResumenPreview(d) {
 
   html += `<div class="pdf-footer">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
-      <span>Sistema de Auditoría de Pallets · IPX · v32</span>
+      <span>Sistema de Auditoría de Pallets</span>
       <span>${new Date().toLocaleDateString('es-MX',{year:'numeric',month:'long',day:'numeric'})}</span>
     </div>
   </div>`;
